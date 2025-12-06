@@ -41,11 +41,13 @@ After connecting, send a subscription message to start receiving events.
   "type": "subscribe",
   "chain": "ethereum",
   "decode": true,
-  "filters": [
-    {
-      "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-      "topic_0": "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
-    }
+  "topics": [
+    "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+  ],
+  "addresses": [
+    "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+    "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
   ]
 }
 ```
@@ -57,9 +59,8 @@ After connecting, send a subscription message to start receiving events.
 | `type` | string | Yes | Must be `"subscribe"` to initiate a subscription |
 | `chain` | string | Yes | The blockchain network (e.g., `"ethereum"`, `"polygon"`, `"arbitrum"`) |
 | `decode` | boolean | Yes | Whether to decode events (`true`) or return raw logs (`false`) |
-| `filters` | array | Yes | Array of filter objects specifying which events to listen for |
-| `filters[].address` | string | Yes | Contract address to monitor (checksummed or lowercase) |
-| `filters[].topic_0` | string | Yes | Event signature hash (keccak256 of event signature) |
+| `topics` | array | Yes | Array of event signature hashes (topic_0) to monitor |
+| `addresses` | array | No | Array of contract addresses to monitor. If omitted, listens to all contracts emitting the specified topics |
 
 ## Response Format
 
@@ -158,16 +159,16 @@ When `decode: false`, events are returned as raw log objects:
 # Connect
 wscat -c wss://stream.yourdomain.com/v1/events
 
-# Send subscription
+# Send subscription (specific contract)
 > {
   "type": "subscribe",
   "chain": "ethereum",
   "decode": true,
-  "filters": [
-    {
-      "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-      "topic_0": "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
-    }
+  "topics": [
+    "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
+  ],
+  "addresses": [
+    "0x1F98431c8aD98523631AE4a59f267346ea31F984"
   ]
 }
 
@@ -194,25 +195,40 @@ wscat -c wss://stream.yourdomain.com/v1/events
 
 ### Multiple Event Subscriptions
 
-You can subscribe to multiple events in a single connection:
+You can subscribe to multiple events and contracts in a single connection:
 
 ```json
 {
   "type": "subscribe",
   "chain": "ethereum",
   "decode": true,
-  "filters": [
-    {
-      "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-      "topic_0": "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
-    },
-    {
-      "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-      "topic_0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-    }
+  "topics": [
+    "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+  ],
+  "addresses": [
+    "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+    "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
   ]
 }
 ```
+
+### Listen to All Contracts
+
+Omit the `addresses` field to monitor events across all contracts:
+
+```json
+{
+  "type": "subscribe",
+  "chain": "ethereum",
+  "decode": false,
+  "topics": [
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+  ]
+}
+```
+
+This will stream all ERC-20 Transfer events from any contract on Ethereum.
 
 ## Notes
 
@@ -220,3 +236,7 @@ You can subscribe to multiple events in a single connection:
 - Events from the same block are batched together in the response
 - Ensure your event signature (topic_0) matches the keccak256 hash of the event signature (e.g., `PoolCreated(address,address,uint24,int24,address)`)
 - For decoded events, the service must have the ABI for the contract to properly decode parameters
+- When `addresses` is omitted, the service monitors all contracts for the specified topics (use with caution on high-volume events)
+- The service matches events where topic_0 is in your `topics` list AND (if specified) the contract address is in your `addresses` list
+
+
