@@ -41,6 +41,7 @@
   - [Data Store](#data-store)
     - [Table 1: topic_0 to ABI](#table-1-topic_0-to-abi)
     - [Table 2: Address to Event ABI](#table-2-address-to-event-abi)
+    - [Table 3: Event ABI Lookup (Extension)](#table-3-event-abi-lookup-extension)
     - [Query 1: Fetch All ABIs for a topic_0](#query-1-fetch-all-abis-for-a-topic_0)
     - [Query 2: Fetch ABIs for a Set of Addresses](#query-2-fetch-abis-for-a-set-of-addresses)
     - [Why Postgres?](#why-postgres)
@@ -643,6 +644,8 @@ When `topic_0` maps to multiple event ABIs:
 
 Postgres with 2 tables. Uses indices for fast lookups.
 
+**Extension:** Add a 3rd table to integer-encode event ABIs for better storage efficiency (see [Table 3](#table-3-event-abi-lookup-extension)).
+
 ### Table 1: topic_0 to ABI
 
 Maps event signatures to their ABIs.
@@ -670,6 +673,22 @@ CREATE TABLE address_to_event_abi (
 
 CREATE INDEX idx_address ON address_to_event_abi (address);
 ```
+
+### Table 3: Event ABI Lookup (Extension)
+
+Optional table that stores ABIs once with an integer ID. Reduces storage when same ABI is referenced by many addresses.
+
+```sql
+CREATE TABLE event_abi_lookup (
+    abi_id SERIAL PRIMARY KEY,
+    event_abi JSONB NOT NULL UNIQUE
+);
+```
+
+With this extension, Table 1 and Table 2 store `abi_id` (INTEGER) instead of `event_abi` (JSONB):
+
+- **Before:** Each row duplicates the full JSONB ABI
+- **After:** Each row stores a 4-byte integer reference
 
 ### Query 1: Fetch All ABIs for a topic_0
 
