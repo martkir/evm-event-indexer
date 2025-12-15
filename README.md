@@ -21,7 +21,6 @@
 - [WebSocket Architecture Design](#websocket-architecture-design)
   - [Method 1: Per-Client Polling](#method-1-per-client-polling)
   - [Method 2: Shared Cache with Pub/Sub Broadcast](#method-2-shared-cache-with-pubsub-broadcast)
-  - [Method 3: Persistent Queue with RabbitMQ](#method-3-persistent-queue-with-rabbitmq)
 - [Webhook Service](#webhook-service)
   - [Overview](#overview-1)
   - [Registering a Webhook](#registering-a-webhook)
@@ -35,6 +34,20 @@
     - [Raw Events Payload](#raw-events-payload)
   - [Response Requirements](#response-requirements)
   - [Example: Uniswap V3 Pool Creation](#example-uniswap-v3-pool-creation)
+- [ABI Repository Service](#abi-repository-service)
+  - [How to Efficiently Decode Events](#how-to-efficiently-decode-events)
+    - [Case 1: Event Signature Matches a Single ABI](#case-1-event-signature-matches-a-single-abi)
+    - [Case 2: Event Signature Matches Multiple ABIs](#case-2-event-signature-matches-multiple-abis)
+  - [Data Store](#data-store)
+    - [Table 1: topic_0 to ABI](#table-1-topic_0-to-abi)
+    - [Table 2: Address to Event ABI](#table-2-address-to-event-abi)
+    - [Query 1: Fetch All ABIs for a topic_0](#query-1-fetch-all-abis-for-a-topic_0)
+    - [Query 2: Fetch ABIs for a Set of Addresses](#query-2-fetch-abis-for-a-set-of-addresses)
+    - [Why Postgres?](#why-postgres)
+  - [Updating the ABI Repository](#updating-the-abi-repository)
+    - [Factory Contract Listener](#factory-contract-listener)
+    - [Fetching ABIs](#fetching-abis)
+    - [Checkpointing](#checkpointing)
 
 ---
 
@@ -387,28 +400,6 @@ flowchart TB
 
 ---
 
-## Method 3: Persistent Queue with RabbitMQ
-
-### How It Works
-
-- **Block Listener Service** polls the RPC proxy for new blocks (same as Method 2)
-- Instead of Redis Pub/Sub, raw block data is pushed to a **RabbitMQ persistent queue**
-- **WebSocket Service** consumes from the queue and broadcasts decoded events to clients
-- If WebSocket Service restarts, it resumes consuming from where it left off — no gaps
-
-### Robustness
-
-- **Service Restart**: RabbitMQ guarantees message delivery; unacknowledged messages are redelivered after restart
-- **Client Reconnection**: Still requires a shared cache so clients can resume from their last processed block
-
-### Why This Method is Not Recommended
-
-- **Added complexity**: Introduces RabbitMQ infrastructure on top of existing components
-- **Still needs shared cache**: To handle client reconnects, you must maintain a cache anyway
-- **No real advantage over Method 2**: Method 2 achieves the same robustness with simpler architecture.
-
----
-
 # Webhook Service
 
 Receive EVM events via HTTP POST requests to your server with optional decoding.
@@ -604,3 +595,123 @@ curl -X POST https://api.yourdomain.com/v1/webhooks \
   ]
 }
 ```
+
+---
+
+# ABI Repository Service
+
+Service that stores and retrieves event ABIs for decoding blockchain events.
+
+## How to Efficiently Decode Events
+
+For each chain, for each block, we receive raw logs from the RPC. We need to:
+
+- **Filter relevant logs** — select only logs where `topic_0` matches event signatures provided by the client
+- **Decode quickly** — expect 100-200 relevant events per block (typical case is < 5)
+
+### Case 1: Event Signature Matches a Single ABI
+
+Most common scenario:
+
+- `topic_0` maps to exactly one event ABI
+- Fetch the ABI directly from the repository
+- Use it to decode all matching events across any contract
+
+**Example:**
+```
+topic_0: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
+→ Transfer(address,address,uint256)
+```
+
+### Case 2: Event Signature Matches Multiple ABIs
+
+When `topic_0` maps to multiple event ABIs:
+
+- Cannot use `topic_0` alone to determine correct ABI
+- Must disambiguate using the log's `address` field
+- Each contract address maps to exactly one event ABI
+
+**Why this happens:**
+- Different contracts can emit events with same signature but different parameter names
+- Indexed vs non-indexed parameters can differ
+
+**Solution:**
+- Look up the ABI by contract `address` instead of `topic_0`
+- Must be fast — potentially 200 lookups per block
+
+## Data Store
+
+Postgres with 2 tables. Uses indices for fast lookups.
+
+### Table 1: topic_0 to ABI
+
+Maps event signatures to their ABIs.
+
+```sql
+CREATE TABLE topic_0_to_abi (
+    topic_0 BYTEA NOT NULL,
+    event_abi JSONB NOT NULL,
+    PRIMARY KEY (topic_0, event_abi)
+);
+
+CREATE INDEX idx_topic_0 ON topic_0_to_abi (topic_0);
+```
+
+### Table 2: Address to Event ABI
+
+Maps contract addresses to their event ABIs.
+
+```sql
+CREATE TABLE address_to_event_abi (
+    address BYTEA NOT NULL,
+    event_abi JSONB NOT NULL,
+    PRIMARY KEY (address, event_abi)
+);
+
+CREATE INDEX idx_address ON address_to_event_abi (address);
+```
+
+### Query 1: Fetch All ABIs for a topic_0
+
+Used in Case 1 to check if signature maps to single or multiple ABIs.
+
+```sql
+SELECT event_abi 
+FROM topic_0_to_abi 
+WHERE topic_0 = $1;
+```
+
+### Query 2: Fetch ABIs for a Set of Addresses
+
+Used in Case 2 when disambiguation is needed.
+
+```sql
+SELECT address, event_abi 
+FROM address_to_event_abi 
+WHERE address = ANY($1);
+```
+
+### Why Postgres?
+
+- **Persistent** — not practical to keep everything in memory
+- **Client-server** — access from anywhere + good tooling and UI support
+- **Fast enough** — indices make lookups quick for our use case
+
+## Updating the ABI Repository
+
+### Factory Contract Listener
+
+- Service listens to contract creation transactions from configured factory contracts
+- API endpoint allows adding/removing factory contracts to monitor
+- When a new contract is created by a factory, update the ABI repository
+
+### Fetching ABIs
+
+- If new contract differs from previously seen contracts, fetch ABI from Etherscan API
+- Store the ABI mapping in both tables
+
+### Checkpointing
+
+- Checkpoint each processed block number
+- WebSocket Service waits for ABI repository to catch up to a block before processing it
+- Ensures ABIs are available before decoding events
