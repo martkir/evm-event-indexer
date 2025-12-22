@@ -295,62 +295,9 @@ This will stream all ERC-20 Transfer events from any contract on Ethereum.
 
 # WebSocket Architecture Design
 
-This section outlines three architectural approaches for the WebSocket event streaming service.
+This section outlines the architectural approaches for the WebSocket event streaming service.
 
-## Method 1: Per-Client Polling
-
-```mermaid
-flowchart TB
-    subgraph Clients["WebSocket Clients"]
-        Client1[Client A<br/>Subscribe: Transfer events]
-        Client2[Client B<br/>Subscribe: PoolCreated events]
-        Client3[Client C<br/>Subscribe: Swap events]
-    end
-
-    subgraph Service["WebSocket Service"]
-        WS[Connection Manager]
-        
-        Pipeline[Client Pipeline ×N<br/>Poll → Parse & Decode<br/>one per connection]
-    end
-
-    subgraph Infra["RPC Infrastructure"]
-        Proxy[RPC Proxy<br/>Multiplexing, Caching]
-        RPC[(EVM RPC Node<br/>Ethereum / Polygon / Arbitrum)]
-    end
-
-    Client1 <-->|WebSocket Connection| WS
-    Client2 <-->|WebSocket Connection| WS
-    Client3 <-->|WebSocket Connection| WS
-
-    WS --> Pipeline
-    Pipeline --> Proxy
-    Proxy -->|Deduplicated Requests| RPC
-    RPC -->|Raw Logs| Proxy
-    Proxy --> Pipeline
-    Pipeline -->|Decoded Events| WS
-```
-
-### How It Works
-
-- Each **WebSocket client** connects and sends a subscription (topics, addresses, chain)
-- The **Connection Manager** spawns a dedicated pipeline for each client
-- Each **Client Pipeline** independently polls the RPC proxy, parses raw logs, and decodes events based on that client's subscription
-- Decoded events are streamed back to the client in real-time
-
-### Why Per-Client Polling is Not Inefficient
-
-- **RPC Proxy multiplexes requests**: Multiple clients polling for the same block data results in a single upstream RPC call
-- **Caching**: Repeated requests for the same data are served from cache — no redundant RPC calls
-- **Simple architecture**: No shared state or pub/sub infrastructure required
-
-### Robustness Against Gaps (Disconnects & Reconnects)
-
-- **Polling is inherently gap-resistant**: Since each client pipeline independently requests data by block number, a client that disconnects and later reconnects can resume polling from the last block it processed.
-- **Stateless recovery**: The system does not require complex per-client state management — clients themselves track which blocks they've seen and simply continue polling from there after any interruption.
-
----
-
-## Method 2: Shared Cache with Pub/Sub Broadcast
+## Method: Shared Cache with Pub/Sub Broadcast
 
 ```mermaid
 flowchart TB
