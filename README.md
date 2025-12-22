@@ -19,20 +19,8 @@
     - [Listen to All Contracts](#listen-to-all-contracts)
   - [Notes](#notes)
 - [WebSocket Architecture Design](#websocket-architecture-design)
-  - [Method: Shared Cache with Pub/Sub Broadcast](#method-shared-cache-with-pubsub-broadcast)
-- [Webhook Service](#webhook-service)
-  - [Overview](#overview-1)
-  - [Registering a Webhook](#registering-a-webhook)
-    - [Endpoint](#endpoint)
-    - [Request](#request)
-    - [Request Parameters](#request-parameters-1)
-    - [Response](#response)
-  - [Deregistering a Webhook](#deregistering-a-webhook)
-  - [Webhook Payload](#webhook-payload)
-    - [Decoded Events Payload](#decoded-events-payload)
-    - [Raw Events Payload](#raw-events-payload)
-  - [Response Requirements](#response-requirements)
-  - [Example: Uniswap V3 Pool Creation](#example-uniswap-v3-pool-creation)
+  - [Scanning Historical Logs](#scanning-historical-logs)
+  - [Listening to New Logs](#listening-to-new-logs)
 - [ABI Repository Service](#abi-repository-service)
   - [How to Efficiently Decode Events](#how-to-efficiently-decode-events)
     - [Case 1: Event Signature Matches a Single ABI](#case-1-event-signature-matches-a-single-abi)
@@ -294,9 +282,7 @@ This will stream all ERC-20 Transfer events from any contract on Ethereum.
 
 # WebSocket Architecture Design
 
-This section outlines the architectural approaches for the WebSocket event streaming service.
-
-## Method: Shared Cache with Pub/Sub Broadcast
+The WebSocket service supports both historical log scanning and real-time event streaming using a unified Data Generator pattern.
 
 ```mermaid
 flowchart TB
@@ -308,7 +294,10 @@ flowchart TB
 
     subgraph WS["WebSocket Service"]
         Broadcast[Broadcast Loop<br/>For each client: Decode → Send]
-        Listener[PubSub Listener]
+        subgraph DataGen["Data Generator"]
+            LiveGen[Live Data Generator]
+            HistGen[Historical Data Generator]
+        end
     end
 
     subgraph BlockService["Block Listener Service"]
@@ -319,229 +308,51 @@ flowchart TB
         RPC[(EVM RPC Node<br/>Ethereum / Polygon / Arbitrum)]
     end
 
+    subgraph DataLake["Data Lake"]
+        Clickhouse[(Clickhouse<br/>Historical Logs)]
+    end
+
     Client1 --- Broadcast
     Client2 --- Broadcast
     Client3 --- Broadcast
 
-    Broadcast --- Listener
-    Listener --- PubSub
-    Listener --- Redis
+    Broadcast --- DataGen
+    LiveGen --- PubSub
+    LiveGen --- Redis
+    HistGen --- Clickhouse
     
     Redis --- Poller
     Poller --- Proxy
     Proxy --- RPC
 ```
 
+## Scanning Historical Logs
+
+Query and decode past blockchain events from the data lake.
+
 ### How It Works
 
-- **Block Listener Service** continuously polls the RPC node for new blocks and writes raw log data to Redis cache
-- **Redis Pub/Sub** emits a notification whenever new block data is cached
-- **WebSocket Service** listens for these notifications, reads raw data from cache, then decodes and broadcasts to connected clients
-- Each client receives only the events matching their subscription filters
+- Client sends subscription with a historical block range
+- **Historical Data Generator** queries Clickhouse for raw logs in that range
+- Logs are decoded and streamed back to client in block order
+- Once historical range is exhausted, generator completes (or switches to live mode)
+
+## Listening to New Logs
+
+Stream decoded events in real-time as new blocks are confirmed.
+
+### How It Works
+
+- **Block Listener Service** polls the RPC node for new blocks and writes raw logs to Redis cache
+- **Redis Pub/Sub** emits a notification when new block data is cached
+- **Live Data Generator** receives notification, reads raw data from cache
+- Logs are decoded and streamed to connected clients matching their subscription filters
 
 ### Why Shared Cache?
 
-- **Client Reconnection**: If a client disconnects and reconnects, it can resume from its last processed block by reading older entries from the cache — no data gaps
-- **Service Restart**: If the WebSocket service restarts, it continues from its last processed block by traversing the cache — no missed events
-- **Decoupled Architecture**: Block polling and client delivery are independent; one can fail without affecting the other
-
----
-
-# Webhook Service
-
-Receive EVM events via HTTP POST requests to your server with optional decoding.
-
-## Overview
-
-The Webhook service sends blockchain events directly to your server via HTTP callbacks. Configure your endpoint once, and we'll automatically send matching events as they occur on-chain.
-
-## Registering a Webhook
-
-### Endpoint
-
-```
-POST https://api.yourdomain.com/v1/webhooks
-```
-
-### Request
-
-```bash
-curl -X POST https://api.yourdomain.com/v1/webhooks \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "url": "https://your-server.com/webhook/events",
-    "chain": "ethereum",
-    "decode": true,
-    "topics": [
-      "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
-    ],
-    "addresses": [
-      "0x1F98431c8aD98523631AE4a59f267346ea31F984"
-    ]
-  }'
-```
-
-### Request Parameters
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `url` | string | Yes | Your server endpoint where events will be sent (must be HTTPS) |
-| `chain` | string | Yes | The blockchain network (e.g., `"ethereum"`, `"polygon"`, `"arbitrum"`) |
-| `decode` | boolean | Yes | Whether to decode events (`true`) or send raw logs (`false`) |
-| `topics` | array | Yes | Array of event signature hashes (topic_0) to monitor |
-| `addresses` | array | No | Array of contract addresses to monitor. If omitted, listens to all contracts emitting the specified topics |
-
-### Response
-
-```json
-{
-  "webhook_id": "wh_1a2b3c4d5e6f",
-  "url": "https://your-server.com/webhook/events",
-  "chain": "ethereum",
-  "decode": true,
-  "status": "active",
-  "created_at": "2024-12-06T10:30:00Z",
-  "topics": [
-    "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
-  ],
-  "addresses": [
-    "0x1F98431c8aD98523631AE4a59f267346ea31F984"
-  ]
-}
-```
-
-## Deregistering a Webhook
-
-### Endpoint
-
-```
-DELETE https://api.yourdomain.com/v1/webhooks/{webhook_id}
-```
-
-### Request
-
-```bash
-curl -X DELETE https://api.yourdomain.com/v1/webhooks/wh_1a2b3c4d5e6f \
-  -H "Authorization: Bearer YOUR_API_KEY"
-```
-
-### Response
-
-```json
-{
-  "webhook_id": "wh_1a2b3c4d5e6f",
-  "status": "deleted",
-  "deleted_at": "2024-12-06T11:00:00Z"
-}
-```
-
-## Webhook Payload
-
-When events matching your filters occur, we'll send an HTTP POST request to your configured URL.
-
-### Decoded Events Payload
-
-When `decode: true`, events are sent with parsed parameters:
-
-```json
-{
-  "webhook_id": "wh_1a2b3c4d5e6f",
-  "block_number": 18500123,
-  "chain": "ethereum",
-  "timestamp": "2024-12-06T10:35:42Z",
-  "data": [
-    {
-      "event_name": "PoolCreated",
-      "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-      "transaction_hash": "0xabc123...",
-      "log_index": 42,
-      "parameters": {
-        "token0": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        "token1": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        "fee": 3000,
-        "tickSpacing": 60,
-        "pool": "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8"
-      }
-    }
-  ]
-}
-```
-
-### Raw Events Payload
-
-When `decode: false`, events are sent as raw log objects:
-
-```json
-{
-  "webhook_id": "wh_1a2b3c4d5e6f",
-  "block_number": 18500123,
-  "chain": "ethereum",
-  "timestamp": "2024-12-06T10:35:42Z",
-  "data": [
-    {
-      "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-      "topics": [
-        "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
-        "0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        "0x000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-      ],
-      "data": "0x0000000000000000000000000000000000000000000000000000000000000bb8000000000000000000000000000000000000000000000000000000000000003c0000000000000000000000008ad599c3a0ff1de082011efddc58f1908eb6e6d8",
-      "block_hash": "0xdef456...",
-      "block_number": 18500123,
-      "transaction_hash": "0xabc123...",
-      "transaction_index": 15,
-      "log_index": 42,
-      "removed": false
-    }
-  ]
-}
-```
-
-## Response Requirements
-
-Your webhook endpoint must:
-- Respond with a `2xx` status code within 5 seconds
-- Accept `Content-Type: application/json`
-
-## Example: Uniswap V3 Pool Creation
-
-```bash
-# Register webhook for decoded PoolCreated events
-curl -X POST https://api.yourdomain.com/v1/webhooks \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "url": "https://your-server.com/webhook/pools",
-    "chain": "ethereum",
-    "decode": true,
-    "topics": ["0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"],
-    "addresses": ["0x1F98431c8aD98523631AE4a59f267346ea31F984"]
-  }'
-
-# Your server receives:
-{
-  "webhook_id": "wh_1a2b3c4d5e6f",
-  "block_number": 18500123,
-  "chain": "ethereum",
-  "timestamp": "2024-12-06T10:35:42Z",
-  "data": [
-    {
-      "event_name": "PoolCreated",
-      "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-      "transaction_hash": "0xabc123...",
-      "log_index": 42,
-      "parameters": {
-        "token0": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        "token1": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        "fee": 3000,
-        "tickSpacing": 60,
-        "pool": "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8"
-      }
-    }
-  ]
-}
-```
+- **Client Reconnection** — resume from last processed block by reading older cache entries
+- **Service Restart** — continue from last block by traversing the cache
+- **Decoupled Architecture** — block polling and client delivery are independent
 
 ---
 
