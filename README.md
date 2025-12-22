@@ -20,6 +20,7 @@
   - [Notes](#notes)
 - [WebSocket Architecture Design](#websocket-architecture-design)
   - [Scanning Historical Logs](#scanning-historical-logs)
+    - [Historical Scan Module](#historical-scan-module)
   - [Listening to New Logs](#listening-to-new-logs)
 - [ABI Repository Service](#abi-repository-service)
   - [How to Efficiently Decode Events](#how-to-efficiently-decode-events)
@@ -80,6 +81,7 @@ After connecting, send a subscription message to start receiving events.
   "type": "subscribe",
   "chain": "ethereum",
   "decode": true,
+  "from_block": 18500000,
   "topics": [
     "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -98,6 +100,7 @@ After connecting, send a subscription message to start receiving events.
 | `type` | string | Yes | Must be `"subscribe"` to initiate a subscription |
 | `chain` | string | Yes | The blockchain network (e.g., `"ethereum"`, `"polygon"`, `"arbitrum"`) |
 | `decode` | boolean | Yes | Whether to decode events (`true`) or return raw logs (`false`) |
+| `from_block` | integer | No | Block number to start scanning/listening from. If omitted, starts from the latest block |
 | `topics` | array | Yes | Array of event signature hashes (topic_0) to monitor |
 | `addresses` | array | No | Array of contract addresses to monitor. If omitted, listens to all contracts emitting the specified topics |
 
@@ -332,10 +335,17 @@ Query and decode past blockchain events from the data lake.
 
 ### How It Works
 
-- Client sends subscription with a historical block range
-- **Historical Data Generator** queries Clickhouse for raw logs in that range
+- Client sends subscription with `from_block` set to a past block number
+- **Historical Data Generator** queries Clickhouse for raw logs starting from that block
 - Logs are decoded and streamed back to client in block order
-- Once historical range is exhausted, generator completes (or switches to live mode)
+- Once caught up to present, generator switches to live mode
+
+### Historical Scan Module
+
+- The Historical Data Generator uses a standalone module with a Clickhouse client optimized for scanning
+- This module can be imported directly into other code — no WebSocket connection required
+- Use it to scan historical data programmatically from any service or script
+- Bypassing WebSocket can achieve higher throughput
 
 ## Listening to New Logs
 
