@@ -36,6 +36,7 @@
   - [Updating the ABI Repository](#updating-the-abi-repository)
     - [Factory Contract Listener](#factory-contract-listener)
     - [Fetching ABIs](#fetching-abis)
+    - [Adding Known Singleton Addresses](#adding-known-singleton-addresses)
     - [Checkpointing](#checkpointing)
 
 ---
@@ -495,6 +496,14 @@ WHERE address = ANY($1);
 
 - If new contract differs from previously seen contracts, fetch ABI from Etherscan API
 - Store the ABI mapping in both tables
+
+### Adding/Removing Known Singleton Addresses
+
+For contracts not created by a factory (e.g., Position Manager, Factory contracts):
+
+- API endpoint to add a singleton contract address with its ABI
+- Manually register well-known contracts that exist outside the factory pattern
+- API endpoint to remove contract addresses and their ABIs from the repository
 
 ### Checkpointing
 
